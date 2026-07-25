@@ -62,15 +62,6 @@ pub enum Error {
     #[error("interrupted")]
     Interrupted,
 
-    /// A background output reader panicked.
-    #[error("failed to capture CMake {stream} for `{}`", path.display())]
-    CmakeOutputReaderPanicked {
-        /// Build directory passed to `CMake`.
-        path: PathBuf,
-        /// Name of the captured output stream.
-        stream: &'static str,
-    },
-
     /// A JSON reply could not be decoded.
     #[error("failed to parse CMake File API reply `{}`: {source}", path.display())]
     Json {

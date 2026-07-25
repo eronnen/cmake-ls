@@ -1,14 +1,16 @@
 //! `CMake` query installation and process execution.
 
-use std::fs;
-use std::io::{self, Read};
+use std::fs::{self, File};
+use std::io::{self, Read as _, Seek as _};
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::thread::{self, JoinHandle};
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
+#[cfg(unix)]
+use std::process::Child;
 
 #[cfg(windows)]
 use command_group::{CommandGroup as _, GroupChild};
@@ -18,6 +20,7 @@ use nix::{
     sys::signal::{Signal, killpg},
     unistd::Pid,
 };
+use tempfile::tempfile;
 
 use crate::error::Error;
 use crate::interrupt;
@@ -33,8 +36,6 @@ const QUERY_PATH: [&str; 6] = [
 ];
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const INTERRUPT_GRACE_PERIOD: Duration = Duration::from_secs(2);
-
-type OutputReader = JoinHandle<io::Result<Vec<u8>>>;
 
 #[cfg(unix)]
 type CmakeChild = Child;
@@ -91,35 +92,28 @@ pub fn prepare_query(build_dir: &Path) -> Result<(), Error> {
 
 /// Reconfigure an existing build tree so `CMake` services the File API query.
 pub fn configure(build_dir: &Path) -> Result<(), Error> {
+    let (mut stdout_capture, stdout_target) = create_output_capture(build_dir, "stdout")?;
+    let (mut stderr_capture, stderr_target) = create_output_capture(build_dir, "stderr")?;
     let mut command = Command::new("cmake");
     command
         .arg(build_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(stdout_target)
+        .stderr(stderr_target);
 
     let mut child = spawn_process_group(&mut command).map_err(|source| Error::StartCmake {
         path: build_dir.to_path_buf(),
         source,
     })?;
-    let stdout = child_process(&mut child)
-        .stdout
-        .take()
-        .expect("CMake stdout was configured as piped");
-    let stderr = child_process(&mut child)
-        .stderr
-        .take()
-        .expect("CMake stderr was configured as piped");
-    let stdout_reader = capture_output(stdout);
-    let stderr_reader = capture_output(stderr);
+    let status = wait_for_cmake(build_dir, &mut child)?;
 
-    let output = wait_for_cmake(build_dir, &mut child, stdout_reader, stderr_reader)?;
-
-    if output.status.success() {
+    if status.success() {
         return Ok(());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = read_output_capture(&mut stdout_capture, build_dir, "stdout")?;
+    let stderr = read_output_capture(&mut stderr_capture, build_dir, "stderr")?;
+    let stdout = String::from_utf8_lossy(&stdout);
+    let stderr = String::from_utf8_lossy(&stderr);
     let mut details = String::new();
 
     if !stdout.trim().is_empty() {
@@ -133,61 +127,105 @@ pub fn configure(build_dir: &Path) -> Result<(), Error> {
 
     Err(Error::CmakeFailed {
         path: build_dir.to_path_buf(),
-        status: output.status,
+        status,
         output: details,
     })
 }
 
-fn capture_output<R>(mut stream: R) -> OutputReader
-where
-    R: Read + Send + 'static,
-{
-    thread::spawn(move || {
-        let mut output = Vec::new();
-        stream.read_to_end(&mut output)?;
-        Ok(output)
-    })
+fn create_output_capture(build_dir: &Path, stream: &'static str) -> Result<(File, Stdio), Error> {
+    let capture = tempfile().map_err(|source| {
+        Error::io(
+            if stream == "stdout" {
+                "create CMake stdout capture"
+            } else {
+                "create CMake stderr capture"
+            },
+            build_dir.into(),
+            source,
+        )
+    })?;
+    let target = capture.try_clone().map_err(|source| {
+        Error::io(
+            if stream == "stdout" {
+                "clone CMake stdout capture"
+            } else {
+                "clone CMake stderr capture"
+            },
+            build_dir.into(),
+            source,
+        )
+    })?;
+
+    Ok((capture, Stdio::from(target)))
 }
 
-fn wait_for_cmake(
+fn read_output_capture(
+    capture: &mut File,
     build_dir: &Path,
-    child: &mut CmakeChild,
-    stdout_reader: OutputReader,
-    stderr_reader: OutputReader,
-) -> Result<Output, Error> {
+    stream: &'static str,
+) -> Result<Vec<u8>, Error> {
+    capture.rewind().map_err(|source| {
+        Error::io(
+            if stream == "stdout" {
+                "rewind CMake stdout capture"
+            } else {
+                "rewind CMake stderr capture"
+            },
+            build_dir.into(),
+            source,
+        )
+    })?;
+
+    let mut output = Vec::new();
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        interrupt::check()?;
+        let read = capture.read(&mut buffer).map_err(|source| {
+            Error::io(
+                if stream == "stdout" {
+                    "read CMake stdout capture"
+                } else {
+                    "read CMake stderr capture"
+                },
+                build_dir.into(),
+                source,
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        output.extend_from_slice(&buffer[..read]);
+    }
+
+    Ok(output)
+}
+
+fn wait_for_cmake(build_dir: &Path, child: &mut CmakeChild) -> Result<ExitStatus, Error> {
     let wait_result = wait_for_exit(build_dir, child);
     if wait_result.is_err() {
         let _ = kill_process_group(child, build_dir);
         let _ = child.wait();
     }
 
-    let stdout_result = join_output(stdout_reader, "stdout", build_dir);
-    let stderr_result = join_output(stderr_reader, "stderr", build_dir);
-    let (status, interrupted) = wait_result?;
-    let stdout = stdout_result?;
-    let stderr = stderr_result?;
-
-    if interrupted {
-        return Err(Error::Interrupted);
-    }
-
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
+    wait_result
 }
 
-fn wait_for_exit(build_dir: &Path, child: &mut CmakeChild) -> Result<(ExitStatus, bool), Error> {
+fn wait_for_exit(build_dir: &Path, child: &mut CmakeChild) -> Result<ExitStatus, Error> {
     let mut interrupt_deadline = None;
     let mut force_killed = false;
 
-    let status = loop {
+    loop {
+        interrupt::check_output()?;
+
         if let Some(status) = child
             .try_wait()
             .map_err(|source| Error::io("poll CMake process", build_dir.into(), source))?
         {
-            break status;
+            return if interrupt_deadline.is_some() {
+                Err(Error::Interrupted)
+            } else {
+                Ok(status)
+            };
         }
 
         let interrupt_count = interrupt::count();
@@ -203,33 +241,7 @@ fn wait_for_exit(build_dir: &Path, child: &mut CmakeChild) -> Result<(ExitStatus
         }
 
         thread::sleep(POLL_INTERVAL);
-    };
-
-    Ok((status, interrupt_deadline.is_some()))
-}
-
-fn join_output(
-    reader: OutputReader,
-    stream: &'static str,
-    build_dir: &Path,
-) -> Result<Vec<u8>, Error> {
-    reader
-        .join()
-        .map_err(|_| Error::CmakeOutputReaderPanicked {
-            path: build_dir.to_path_buf(),
-            stream,
-        })?
-        .map_err(|source| {
-            Error::io(
-                if stream == "stdout" {
-                    "read CMake stdout"
-                } else {
-                    "read CMake stderr"
-                },
-                build_dir.into(),
-                source,
-            )
-        })
+    }
 }
 
 #[cfg(unix)]
@@ -288,14 +300,4 @@ fn spawn_process_group(command: &mut Command) -> io::Result<CmakeChild> {
 #[cfg(windows)]
 fn spawn_process_group(command: &mut Command) -> io::Result<CmakeChild> {
     command.group_spawn()
-}
-
-#[cfg(unix)]
-const fn child_process(child: &mut CmakeChild) -> &mut Child {
-    child
-}
-
-#[cfg(windows)]
-fn child_process(child: &mut CmakeChild) -> &mut Child {
-    child.inner()
 }

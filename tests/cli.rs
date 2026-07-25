@@ -123,6 +123,44 @@ fn treats_a_closed_stdout_pipe_as_normal_termination() {
 
 #[cfg(unix)]
 #[test]
+fn downstream_pipe_closure_interrupts_active_cmake() {
+    let temporary = tempdir().expect("create temporary directory");
+    let source_dir = temporary.path().join("source");
+    let build_dir = temporary.path().join("build");
+    create_project(&source_dir);
+    configure_project(&source_dir, &build_dir);
+    fs::write(
+        source_dir.join("CMakeLists.txt"),
+        r"
+cmake_minimum_required(VERSION 3.14)
+project(cmake_ls_closed_pipe NONE)
+execute_process(COMMAND ${CMAKE_COMMAND} -E touch
+                ${CMAKE_BINARY_DIR}/cmake-ls-sleeping)
+execute_process(COMMAND ${CMAKE_COMMAND} -E sleep 30)
+add_custom_target(waited)
+",
+    )
+    .expect("replace project file");
+
+    let started = Instant::now();
+    let mut child = cmake_ls()
+        .arg(&build_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start cmake-ls");
+    wait_for_path(&build_dir.join("cmake-ls-sleeping"), Duration::from_secs(5));
+    drop(child.stdout.take().expect("take stdout pipe"));
+
+    let output = child.wait_with_output().expect("wait for cmake-ls");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[cfg(unix)]
+#[test]
 fn ctrl_c_interrupts_an_active_cmake_process_group() {
     let temporary = tempdir().expect("create temporary directory");
     let source_dir = temporary.path().join("source");
@@ -150,6 +188,65 @@ add_custom_target(waited)
         .spawn()
         .expect("start cmake-ls");
     wait_for_path(&build_dir.join("cmake-ls-sleeping"), Duration::from_secs(5));
+
+    let signal_status = Command::new("kill")
+        .arg("-INT")
+        .arg(child.id().to_string())
+        .status()
+        .expect("send SIGINT");
+    assert!(signal_status.success());
+
+    let output = child.wait_with_output().expect("wait for cmake-ls");
+
+    assert_eq!(output.status.code(), Some(130));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_c_cleans_up_descendants_that_keep_output_open() {
+    let temporary = tempdir().expect("create temporary directory");
+    let source_dir = temporary.path().join("source");
+    let build_dir = temporary.path().join("build");
+    create_project(&source_dir);
+    configure_project(&source_dir, &build_dir);
+    fs::write(
+        source_dir.join("ignore-interrupt.sh"),
+        r#"trap '' INT
+sleep 30 &
+trap - INT
+touch "$1"
+sleep 30
+"#,
+    )
+    .expect("write interrupt fixture");
+    fs::write(
+        source_dir.join("CMakeLists.txt"),
+        r"
+cmake_minimum_required(VERSION 3.14)
+project(cmake_ls_descendant_interrupt NONE)
+execute_process(
+  COMMAND /bin/sh ${CMAKE_SOURCE_DIR}/ignore-interrupt.sh
+          ${CMAKE_BINARY_DIR}/cmake-ls-descendant-sleeping
+)
+add_custom_target(waited)
+",
+    )
+    .expect("replace project file");
+
+    let started = Instant::now();
+    let child = cmake_ls()
+        .arg(&build_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start cmake-ls");
+    wait_for_path(
+        &build_dir.join("cmake-ls-descendant-sleeping"),
+        Duration::from_secs(5),
+    );
 
     let signal_status = Command::new("kill")
         .arg("-INT")

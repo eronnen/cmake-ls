@@ -1,12 +1,14 @@
 //! Typed parsing for `CMake` File API codemodel replies.
 
 use std::collections::BTreeSet;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::error::Error;
+use crate::interrupt;
 
 const CLIENT_REPLY: &str = "client-cmake-ls";
 const CODEMODEL_REPLY: &str = "codemodel-v2";
@@ -115,12 +117,16 @@ fn read_targets_once(build_dir: &Path) -> Result<BTreeSet<String>, Error> {
     let codemodel: Codemodel = read_json(&codemodel_path)?;
     validate_version(&codemodel_path, &codemodel.kind, &codemodel.version)?;
 
-    Ok(codemodel
-        .configurations
-        .into_iter()
-        .flat_map(|configuration| configuration.targets)
-        .map(|target| target.name)
-        .collect())
+    let mut targets = BTreeSet::new();
+    for configuration in codemodel.configurations {
+        interrupt::check()?;
+        for target in configuration.targets {
+            interrupt::check()?;
+            targets.insert(target.name);
+        }
+    }
+
+    Ok(targets)
 }
 
 fn latest_index(reply_dir: &Path) -> Result<PathBuf, Error> {
@@ -129,6 +135,7 @@ fn latest_index(reply_dir: &Path) -> Result<PathBuf, Error> {
 
     let mut latest = None;
     for entry in entries {
+        interrupt::check()?;
         let entry = entry
             .map_err(|source| Error::io("read File API reply entry", reply_dir.into(), source))?;
         let name = entry.file_name();
@@ -159,12 +166,46 @@ fn read_json<T>(path: &Path) -> Result<T, Error>
 where
     T: for<'de> Deserialize<'de>,
 {
-    let contents =
-        fs::read(path).map_err(|source| Error::io("read File API reply", path.into(), source))?;
-    serde_json::from_slice(&contents).map_err(|source| Error::Json {
-        path: path.to_path_buf(),
-        source,
+    let file =
+        File::open(path).map_err(|source| Error::io("read File API reply", path.into(), source))?;
+    let reader = BufReader::new(InterruptibleReader::new(file));
+
+    serde_json::from_reader(reader).map_err(|source| {
+        if source.io_error_kind() == Some(io::ErrorKind::Interrupted) && interrupt::count() > 0 {
+            Error::Interrupted
+        } else {
+            Error::Json {
+                path: path.to_path_buf(),
+                source,
+            }
+        }
     })
+}
+
+struct InterruptibleReader<R> {
+    inner: R,
+}
+
+impl<R> InterruptibleReader<R> {
+    const fn new(inner: R) -> Self {
+        Self { inner }
+    }
+}
+
+impl<R> Read for InterruptibleReader<R>
+where
+    R: Read,
+{
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if interrupt::count() > 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "operation interrupted",
+            ));
+        }
+
+        self.inner.read(buffer)
+    }
 }
 
 fn validate_version(path: &Path, kind: &str, version: &Version) -> Result<(), Error> {
