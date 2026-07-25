@@ -54,6 +54,23 @@ pub enum Error {
         output: String,
     },
 
+    /// The interrupt handler could not be installed.
+    #[error("failed to install Ctrl+C handler: {0}")]
+    InstallInterruptHandler(#[source] ctrlc::Error),
+
+    /// The operation was interrupted by the user.
+    #[error("interrupted")]
+    Interrupted,
+
+    /// A background output reader panicked.
+    #[error("failed to capture CMake {stream} for `{}`", path.display())]
+    CmakeOutputReaderPanicked {
+        /// Build directory passed to `CMake`.
+        path: PathBuf,
+        /// Name of the captured output stream.
+        stream: &'static str,
+    },
+
     /// A JSON reply could not be decoded.
     #[error("failed to parse CMake File API reply `{}`: {source}", path.display())]
     Json {
@@ -102,6 +119,19 @@ impl Error {
                 action: _,
                 path: _
             } if source.kind() == io::ErrorKind::NotFound
+        )
+    }
+
+    /// Whether the operation was interrupted by the user.
+    pub const fn is_interrupted(&self) -> bool {
+        matches!(self, Self::Interrupted)
+    }
+
+    /// Whether the output consumer closed its pipe.
+    pub fn is_broken_pipe(&self) -> bool {
+        matches!(
+            self,
+            Self::WriteStdout(source) if source.kind() == io::ErrorKind::BrokenPipe
         )
     }
 }

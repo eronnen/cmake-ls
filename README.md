@@ -3,6 +3,8 @@
 `cmake-ls` prints the buildable targets in an existing CMake build tree.
 Target names are sorted, deduplicated across configurations, and written one
 per line, making the output suitable for interactive use and shell pipelines.
+If a downstream command closes the output pipe early, `cmake-ls` terminates
+without reporting a broken-pipe error.
 
 ## Requirements
 
@@ -49,6 +51,11 @@ included.
 Running `cmake-ls` re-executes the project's configure and generate steps. As
 with invoking CMake directly, project configuration logic can have side effects
 or depend on the current environment.
+
+Pressing Ctrl+C stops the active CMake process group and exits with status 130.
+On Unix, `cmake-ls` first forwards an interrupt and forcefully terminates the
+group if it does not stop within two seconds or Ctrl+C is pressed again. On
+platforms without graceful process-group interrupts, cancellation is immediate.
 
 ## Development
 
