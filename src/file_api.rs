@@ -7,8 +7,8 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::cancellation::Cancellation;
 use crate::error::Error;
-use crate::interrupt;
 
 const CLIENT_REPLY: &str = "client-cmake-ls";
 const CODEMODEL_REPLY: &str = "codemodel-v2";
@@ -75,9 +75,12 @@ struct Target {
 }
 
 /// Read sorted, unique buildable target names from the latest File API reply.
-pub fn read_targets(build_dir: &Path) -> Result<BTreeSet<String>, Error> {
+pub fn read_targets(
+    build_dir: &Path,
+    cancellation: &Cancellation,
+) -> Result<BTreeSet<String>, Error> {
     for attempt in 0..MAX_READ_ATTEMPTS {
-        match read_targets_once(build_dir) {
+        match read_targets_once(build_dir, cancellation) {
             Ok(targets) => return Ok(targets),
             Err(error) if error.is_not_found() && attempt + 1 < MAX_READ_ATTEMPTS => {
                 std::thread::yield_now();
@@ -89,10 +92,13 @@ pub fn read_targets(build_dir: &Path) -> Result<BTreeSet<String>, Error> {
     unreachable!("the bounded read loop always returns")
 }
 
-fn read_targets_once(build_dir: &Path) -> Result<BTreeSet<String>, Error> {
+fn read_targets_once(
+    build_dir: &Path,
+    cancellation: &Cancellation,
+) -> Result<BTreeSet<String>, Error> {
     let reply_dir = build_dir.join(".cmake/api/v1/reply");
-    let index_path = latest_index(&reply_dir)?;
-    let index: ReplyIndex = read_json(&index_path)?;
+    let index_path = latest_index(&reply_dir, cancellation)?;
+    let index: ReplyIndex = read_json(&index_path, cancellation)?;
 
     let client = index.reply.client.ok_or_else(|| Error::FileApi {
         path: index_path.clone(),
@@ -114,14 +120,14 @@ fn read_targets_once(build_dir: &Path) -> Result<BTreeSet<String>, Error> {
 
     validate_version(&reply_dir, &reference.kind, &reference.version)?;
     let codemodel_path = resolve_reference(&reply_dir, &reference.json_file)?;
-    let codemodel: Codemodel = read_json(&codemodel_path)?;
+    let codemodel: Codemodel = read_json(&codemodel_path, cancellation)?;
     validate_version(&codemodel_path, &codemodel.kind, &codemodel.version)?;
 
     let mut targets = BTreeSet::new();
     for configuration in codemodel.configurations {
-        interrupt::check()?;
+        cancellation.checkpoint()?;
         for target in configuration.targets {
-            interrupt::check()?;
+            cancellation.checkpoint()?;
             targets.insert(target.name);
         }
     }
@@ -129,13 +135,13 @@ fn read_targets_once(build_dir: &Path) -> Result<BTreeSet<String>, Error> {
     Ok(targets)
 }
 
-fn latest_index(reply_dir: &Path) -> Result<PathBuf, Error> {
+fn latest_index(reply_dir: &Path, cancellation: &Cancellation) -> Result<PathBuf, Error> {
     let entries = fs::read_dir(reply_dir)
         .map_err(|source| Error::io("read File API reply directory", reply_dir.into(), source))?;
 
     let mut latest = None;
     for entry in entries {
-        interrupt::check()?;
+        cancellation.checkpoint()?;
         let entry = entry
             .map_err(|source| Error::io("read File API reply entry", reply_dir.into(), source))?;
         let name = entry.file_name();
@@ -162,16 +168,18 @@ fn latest_index(reply_dir: &Path) -> Result<PathBuf, Error> {
     })
 }
 
-fn read_json<T>(path: &Path) -> Result<T, Error>
+fn read_json<T>(path: &Path, cancellation: &Cancellation) -> Result<T, Error>
 where
     T: for<'de> Deserialize<'de>,
 {
     let file =
         File::open(path).map_err(|source| Error::io("read File API reply", path.into(), source))?;
-    let reader = BufReader::new(InterruptibleReader::new(file));
+    let reader = BufReader::new(InterruptibleReader::new(file, cancellation));
 
     serde_json::from_reader(reader).map_err(|source| {
-        if source.io_error_kind() == Some(io::ErrorKind::Interrupted) && interrupt::count() > 0 {
+        if source.io_error_kind() == Some(io::ErrorKind::Interrupted)
+            && cancellation.interrupt_count() > 0
+        {
             Error::Interrupted
         } else {
             Error::Json {
@@ -182,22 +190,26 @@ where
     })
 }
 
-struct InterruptibleReader<R> {
+struct InterruptibleReader<'a, R> {
     inner: R,
+    cancellation: &'a Cancellation,
 }
 
-impl<R> InterruptibleReader<R> {
-    const fn new(inner: R) -> Self {
-        Self { inner }
+impl<'a, R> InterruptibleReader<'a, R> {
+    const fn new(inner: R, cancellation: &'a Cancellation) -> Self {
+        Self {
+            inner,
+            cancellation,
+        }
     }
 }
 
-impl<R> Read for InterruptibleReader<R>
+impl<R> Read for InterruptibleReader<'_, R>
 where
     R: Read,
 {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if interrupt::count() > 0 {
+        if self.cancellation.interrupt_count() > 0 {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "operation interrupted",
@@ -254,6 +266,8 @@ mod tests {
     use std::path::Path;
 
     use tempfile::tempdir;
+
+    use crate::cancellation::Cancellation;
 
     use super::{Version, read_targets, resolve_reference, validate_version};
 
@@ -329,7 +343,8 @@ mod tests {
             }"#,
         );
 
-        let targets = read_targets(build_dir.path()).expect("read target names");
+        let targets =
+            read_targets(build_dir.path(), &Cancellation::default()).expect("read target names");
         let names: Vec<_> = targets.into_iter().collect();
 
         assert_eq!(names, ["alpha", "middle", "zeta"]);
@@ -347,7 +362,8 @@ mod tests {
             }"#,
         );
 
-        let targets = read_targets(build_dir.path()).expect("read target names");
+        let targets =
+            read_targets(build_dir.path(), &Cancellation::default()).expect("read target names");
 
         assert!(targets.is_empty());
     }
@@ -359,7 +375,8 @@ mod tests {
         fs::create_dir_all(&reply_dir).expect("create reply directory");
         fs::write(reply_dir.join("index-test.json"), r#"{ "reply": {} }"#).expect("write index");
 
-        let error = read_targets(build_dir.path()).expect_err("reject missing response");
+        let error = read_targets(build_dir.path(), &Cancellation::default())
+            .expect_err("reject missing response");
 
         assert!(error.to_string().contains("client-cmake-ls"));
     }
@@ -371,7 +388,8 @@ mod tests {
         fs::create_dir_all(&reply_dir).expect("create reply directory");
         fs::write(reply_dir.join("index-test.json"), "{invalid").expect("write index");
 
-        let error = read_targets(build_dir.path()).expect_err("reject malformed JSON");
+        let error = read_targets(build_dir.path(), &Cancellation::default())
+            .expect_err("reject malformed JSON");
 
         assert!(error.to_string().contains("failed to parse"));
     }

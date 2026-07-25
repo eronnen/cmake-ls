@@ -22,8 +22,8 @@ use nix::{
 };
 use tempfile::tempfile;
 
+use crate::cancellation::Cancellation;
 use crate::error::Error;
-use crate::interrupt;
 
 const CACHE_FILE: &str = "CMakeCache.txt";
 const QUERY_PATH: [&str; 6] = [
@@ -91,7 +91,7 @@ pub fn prepare_query(build_dir: &Path) -> Result<(), Error> {
 }
 
 /// Reconfigure an existing build tree so `CMake` services the File API query.
-pub fn configure(build_dir: &Path) -> Result<(), Error> {
+pub fn configure(build_dir: &Path, cancellation: &Cancellation) -> Result<(), Error> {
     let (mut stdout_capture, stdout_target) = create_output_capture(build_dir, "stdout")?;
     let (mut stderr_capture, stderr_target) = create_output_capture(build_dir, "stderr")?;
     let mut command = Command::new("cmake");
@@ -104,14 +104,14 @@ pub fn configure(build_dir: &Path) -> Result<(), Error> {
         path: build_dir.to_path_buf(),
         source,
     })?;
-    let status = wait_for_cmake(build_dir, &mut child)?;
+    let status = wait_for_cmake(build_dir, &mut child, cancellation)?;
 
     if status.success() {
         return Ok(());
     }
 
-    let stdout = read_output_capture(&mut stdout_capture, build_dir, "stdout")?;
-    let stderr = read_output_capture(&mut stderr_capture, build_dir, "stderr")?;
+    let stdout = read_output_capture(&mut stdout_capture, build_dir, "stdout", cancellation)?;
+    let stderr = read_output_capture(&mut stderr_capture, build_dir, "stderr", cancellation)?;
     let stdout = String::from_utf8_lossy(&stdout);
     let stderr = String::from_utf8_lossy(&stderr);
     let mut details = String::new();
@@ -163,6 +163,7 @@ fn read_output_capture(
     capture: &mut File,
     build_dir: &Path,
     stream: &'static str,
+    cancellation: &Cancellation,
 ) -> Result<Vec<u8>, Error> {
     capture.rewind().map_err(|source| {
         Error::io(
@@ -179,7 +180,7 @@ fn read_output_capture(
     let mut output = Vec::new();
     let mut buffer = vec![0; 64 * 1024];
     loop {
-        interrupt::check()?;
+        cancellation.checkpoint()?;
         let read = capture.read(&mut buffer).map_err(|source| {
             Error::io(
                 if stream == "stdout" {
@@ -200,8 +201,12 @@ fn read_output_capture(
     Ok(output)
 }
 
-fn wait_for_cmake(build_dir: &Path, child: &mut CmakeChild) -> Result<ExitStatus, Error> {
-    let wait_result = wait_for_exit(build_dir, child);
+fn wait_for_cmake(
+    build_dir: &Path,
+    child: &mut CmakeChild,
+    cancellation: &Cancellation,
+) -> Result<ExitStatus, Error> {
+    let wait_result = wait_for_exit(build_dir, child, cancellation);
     if wait_result.is_err() {
         let _ = kill_process_group(child, build_dir);
         let _ = child.wait();
@@ -210,12 +215,16 @@ fn wait_for_cmake(build_dir: &Path, child: &mut CmakeChild) -> Result<ExitStatus
     wait_result
 }
 
-fn wait_for_exit(build_dir: &Path, child: &mut CmakeChild) -> Result<ExitStatus, Error> {
+fn wait_for_exit(
+    build_dir: &Path,
+    child: &mut CmakeChild,
+    cancellation: &Cancellation,
+) -> Result<ExitStatus, Error> {
     let mut interrupt_deadline = None;
     let mut force_killed = false;
 
     loop {
-        interrupt::check_output()?;
+        cancellation.checkpoint_output()?;
 
         if let Some(status) = child
             .try_wait()
@@ -228,7 +237,7 @@ fn wait_for_exit(build_dir: &Path, child: &mut CmakeChild) -> Result<ExitStatus,
             };
         }
 
-        let interrupt_count = interrupt::count();
+        let interrupt_count = cancellation.interrupt_count();
         if interrupt_count > 0 && interrupt_deadline.is_none() {
             request_interrupt(child, build_dir)?;
             interrupt_deadline = Some(Instant::now() + INTERRUPT_GRACE_PERIOD);
