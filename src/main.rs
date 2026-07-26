@@ -1,7 +1,6 @@
 //! List buildable targets from an existing `CMake` build tree.
 
 mod cancellation;
-mod cli;
 mod cmake;
 mod error;
 mod file_api;
@@ -12,8 +11,23 @@ use std::process::ExitCode;
 use clap::Parser as _;
 
 use crate::cancellation::Cancellation;
-use crate::cli::Cli;
 use crate::error::Error;
+
+
+#[derive(Debug, clap::Parser)]
+#[command(
+    version,
+    about = "List buildable targets from an existing CMake build tree"
+)]
+struct Cli {
+    /// Existing `CMake` build directory.
+    #[arg(
+        default_value = "build",
+        value_name = "BUILD_DIR",
+        help = "Existing CMake build directory"
+    )]
+    pub build_dir: std::path::PathBuf,
+}
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
