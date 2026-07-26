@@ -18,6 +18,10 @@ use crate::error::Error;
     about = "List buildable targets from an existing CMake build tree"
 )]
 struct Cli {
+    /// Regenerate the File API reply even when the existing reply is current.
+    #[arg(long, help = "Regenerate the File API reply before listing targets")]
+    pub refresh: bool,
+
     /// Existing `CMake` build directory.
     #[arg(
         default_value = "build",
@@ -56,7 +60,7 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli, cancellation: &Cancellation) -> Result<(), Error> {
     let build_tree = cmake::BuildTree::new(&cli.build_dir);
-    let targets = build_tree.targets(cancellation)?;
+    let targets = build_tree.targets(cli.refresh, cancellation)?;
     cancellation.checkpoint()?;
     let stdout = io::stdout();
     let mut output = BufWriter::new(stdout.lock());

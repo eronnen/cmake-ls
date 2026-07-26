@@ -37,10 +37,16 @@ The command creates a client-owned CMake File API codemodel query at:
 <build>/.cmake/api/v1/query/client-cmake-ls/codemodel-v2
 ```
 
-It then runs `cmake <build>` to regenerate the existing build tree using its
-cached source directory, generator, toolchain, and cache options. Routine CMake
-output is suppressed. If regeneration fails, the captured CMake output is
-reported on stderr and the command exits unsuccessfully.
+It also queries the File API's `cmakeFiles-v1` object, which lists the files
+CMake used while configuring and generating. If the newest reply contains both
+objects and none of those input files is newer than the reply, `cmake-ls`
+reuses it without starting CMake. Projects with `CONFIGURE_DEPENDS` globs are
+regenerated conservatively.
+
+Otherwise, the command runs `cmake <build>` to regenerate the existing build
+tree using its cached source directory, generator, toolchain, and cache options.
+Routine CMake output is suppressed. If regeneration fails, the captured CMake
+output is reported on stderr and the command exits unsuccessfully.
 
 After regeneration, `cmake-ls` follows the query's reference from the newest
 File API reply index and reads the codemodel. It lists executables, libraries,
@@ -48,9 +54,10 @@ and custom or utility targets represented in the codemodel's buildable target
 list. Abstract imported targets and non-buildable interface libraries are not
 included.
 
-Running `cmake-ls` re-executes the project's configure and generate steps. As
-with invoking CMake directly, project configuration logic can have side effects
-or depend on the current environment.
+Use `cmake-ls --refresh` to regenerate unconditionally. This is useful for
+project configuration logic that depends on the current environment or other
+external state that is not represented by CMake's input-file list. As with
+invoking CMake directly, regeneration can have side effects.
 
 Pressing Ctrl+C stops the active CMake process group and exits with status 130.
 On Unix, `cmake-ls` first forwards an interrupt and forcefully terminates the

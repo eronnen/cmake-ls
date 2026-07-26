@@ -1,4 +1,4 @@
-use super::support::TestProject;
+use super::support::{TestProject, assert_success};
 
 #[test]
 fn rejects_an_unconfigured_directory_without_creating_a_query() {
@@ -18,6 +18,7 @@ fn rejects_an_unconfigured_directory_without_creating_a_query() {
 #[test]
 fn reports_cmake_regeneration_failures() {
     let project = TestProject::configured();
+    assert_success(&project.run());
     project.replace_cmake_lists("not_a_cmake_command()\n");
 
     let output = project.run();

@@ -13,6 +13,8 @@ fn accepts_codemodel_v2() {
         Path::new("codemodel.json"),
         "codemodel",
         &Version { major: 2, minor: 9 },
+        "codemodel",
+        2,
     );
 
     assert!(result.is_ok());
@@ -24,6 +26,8 @@ fn rejects_other_object_kinds() {
         Path::new("cache.json"),
         "cache",
         &Version { major: 2, minor: 0 },
+        "codemodel",
+        2,
     );
 
     assert!(result.is_err());
@@ -35,6 +39,8 @@ fn rejects_other_codemodel_versions() {
         Path::new("codemodel.json"),
         "codemodel",
         &Version { major: 3, minor: 0 },
+        "codemodel",
+        2,
     );
 
     assert!(result.is_err());

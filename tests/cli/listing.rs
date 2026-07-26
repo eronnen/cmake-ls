@@ -16,6 +16,11 @@ fn lists_buildable_targets_from_the_default_build_directory() {
             .build_path(".cmake/api/v1/query/client-cmake-ls/codemodel-v2")
             .is_file()
     );
+    assert!(
+        project
+            .build_path(".cmake/api/v1/query/client-cmake-ls/cmakeFiles-v1")
+            .is_file()
+    );
 }
 
 #[test]
@@ -43,4 +48,37 @@ fn treats_a_closed_stdout_pipe_as_normal_termination() {
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn reuses_a_current_file_api_reply_without_running_cmake() {
+    let project = TestProject::configured();
+    assert_success(&project.run());
+
+    let output = project
+        .command()
+        .env("PATH", "")
+        .output()
+        .expect("run cmake-ls without CMake on PATH");
+
+    assert_success(&output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), TARGET_LIST);
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn refresh_regenerates_even_when_the_file_api_reply_is_current() {
+    let project = TestProject::configured();
+    assert_success(&project.run());
+
+    let output = project
+        .command()
+        .arg("--refresh")
+        .env("PATH", "")
+        .output()
+        .expect("run cmake-ls without CMake on PATH");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("failed to run `cmake`"));
 }
