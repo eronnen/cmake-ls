@@ -3,10 +3,11 @@ name = "cmake-ls"
 version = "0.1.0"
 edition = "2024"
 description = "List buildable targets from an existing CMake build tree"
+license = "MIT"
 readme = "README.md"
 keywords = ["cmake", "cli", "build"]
 categories = ["command-line-utilities", "development-tools::build-utils"]
-publish = false
+publish = true
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
