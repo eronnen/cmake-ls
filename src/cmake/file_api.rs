@@ -10,6 +10,8 @@ use serde::Deserialize;
 use crate::cancellation::Cancellation;
 use crate::error::Error;
 
+use super::Cmake;
+
 const CLIENT_REPLY: &str = "client-cmake-ls";
 const CODEMODEL_REPLY: &str = "codemodel-v2";
 const MAX_READ_ATTEMPTS: usize = 3;
@@ -74,65 +76,61 @@ struct Target {
     name: String,
 }
 
-/// Read sorted, unique buildable target names from the latest File API reply.
-pub fn read_targets(
-    build_dir: &Path,
-    cancellation: &Cancellation,
-) -> Result<BTreeSet<String>, Error> {
-    for attempt in 0..MAX_READ_ATTEMPTS {
-        match read_targets_once(build_dir, cancellation) {
-            Ok(targets) => return Ok(targets),
-            Err(error) if error.is_not_found() && attempt + 1 < MAX_READ_ATTEMPTS => {
-                std::thread::yield_now();
+impl Cmake<'_> {
+    /// Read sorted, unique buildable target names from the latest File API reply.
+    pub fn read_targets(&self, cancellation: &Cancellation) -> Result<BTreeSet<String>, Error> {
+        for attempt in 0..MAX_READ_ATTEMPTS {
+            match self.read_targets_once(cancellation) {
+                Ok(targets) => return Ok(targets),
+                Err(error) if error.is_not_found() && attempt + 1 < MAX_READ_ATTEMPTS => {
+                    std::thread::yield_now();
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
         }
+
+        unreachable!("the bounded read loop always returns")
     }
 
-    unreachable!("the bounded read loop always returns")
-}
+    fn read_targets_once(&self, cancellation: &Cancellation) -> Result<BTreeSet<String>, Error> {
+        let reply_dir = self.build_dir.join(".cmake/api/v1/reply");
+        let index_path = latest_index(&reply_dir, cancellation)?;
+        let index: ReplyIndex = read_json(&index_path, cancellation)?;
 
-fn read_targets_once(
-    build_dir: &Path,
-    cancellation: &Cancellation,
-) -> Result<BTreeSet<String>, Error> {
-    let reply_dir = build_dir.join(".cmake/api/v1/reply");
-    let index_path = latest_index(&reply_dir, cancellation)?;
-    let index: ReplyIndex = read_json(&index_path, cancellation)?;
+        let client = index.reply.client.ok_or_else(|| Error::FileApi {
+            path: index_path.clone(),
+            reason: format!("reply does not contain `{CLIENT_REPLY}`"),
+        })?;
+        let response = client.codemodel.ok_or_else(|| Error::FileApi {
+            path: index_path.clone(),
+            reason: format!("reply does not contain `{CODEMODEL_REPLY}`"),
+        })?;
+        let reference = match response {
+            QueryResponse::Reference(reference) => reference,
+            QueryResponse::Error(error) => {
+                return Err(Error::FileApi {
+                    path: index_path,
+                    reason: format!("CMake rejected the codemodel query: {}", error.error),
+                });
+            }
+        };
 
-    let client = index.reply.client.ok_or_else(|| Error::FileApi {
-        path: index_path.clone(),
-        reason: format!("reply does not contain `{CLIENT_REPLY}`"),
-    })?;
-    let response = client.codemodel.ok_or_else(|| Error::FileApi {
-        path: index_path.clone(),
-        reason: format!("reply does not contain `{CODEMODEL_REPLY}`"),
-    })?;
-    let reference = match response {
-        QueryResponse::Reference(reference) => reference,
-        QueryResponse::Error(error) => {
-            return Err(Error::FileApi {
-                path: index_path,
-                reason: format!("CMake rejected the codemodel query: {}", error.error),
-            });
-        }
-    };
+        validate_version(&reply_dir, &reference.kind, &reference.version)?;
+        let codemodel_path = resolve_reference(&reply_dir, &reference.json_file)?;
+        let codemodel: Codemodel = read_json(&codemodel_path, cancellation)?;
+        validate_version(&codemodel_path, &codemodel.kind, &codemodel.version)?;
 
-    validate_version(&reply_dir, &reference.kind, &reference.version)?;
-    let codemodel_path = resolve_reference(&reply_dir, &reference.json_file)?;
-    let codemodel: Codemodel = read_json(&codemodel_path, cancellation)?;
-    validate_version(&codemodel_path, &codemodel.kind, &codemodel.version)?;
-
-    let mut targets = BTreeSet::new();
-    for configuration in codemodel.configurations {
-        cancellation.checkpoint()?;
-        for target in configuration.targets {
+        let mut targets = BTreeSet::new();
+        for configuration in codemodel.configurations {
             cancellation.checkpoint()?;
-            targets.insert(target.name);
+            for target in configuration.targets {
+                cancellation.checkpoint()?;
+                targets.insert(target.name);
+            }
         }
-    }
 
-    Ok(targets)
+        Ok(targets)
+    }
 }
 
 fn latest_index(reply_dir: &Path, cancellation: &Cancellation) -> Result<PathBuf, Error> {
@@ -269,7 +267,7 @@ mod tests {
 
     use crate::cancellation::Cancellation;
 
-    use super::{Version, read_targets, resolve_reference, validate_version};
+    use super::{Cmake, Version, resolve_reference, validate_version};
 
     #[test]
     fn accepts_codemodel_v2() {
@@ -343,8 +341,9 @@ mod tests {
             }"#,
         );
 
-        let targets =
-            read_targets(build_dir.path(), &Cancellation::default()).expect("read target names");
+        let targets = Cmake::new(build_dir.path())
+            .read_targets(&Cancellation::default())
+            .expect("read target names");
         let names: Vec<_> = targets.into_iter().collect();
 
         assert_eq!(names, ["alpha", "middle", "zeta"]);
@@ -362,8 +361,9 @@ mod tests {
             }"#,
         );
 
-        let targets =
-            read_targets(build_dir.path(), &Cancellation::default()).expect("read target names");
+        let targets = Cmake::new(build_dir.path())
+            .read_targets(&Cancellation::default())
+            .expect("read target names");
 
         assert!(targets.is_empty());
     }
@@ -375,7 +375,8 @@ mod tests {
         fs::create_dir_all(&reply_dir).expect("create reply directory");
         fs::write(reply_dir.join("index-test.json"), r#"{ "reply": {} }"#).expect("write index");
 
-        let error = read_targets(build_dir.path(), &Cancellation::default())
+        let error = Cmake::new(build_dir.path())
+            .read_targets(&Cancellation::default())
             .expect_err("reject missing response");
 
         assert!(error.to_string().contains("client-cmake-ls"));
@@ -388,7 +389,8 @@ mod tests {
         fs::create_dir_all(&reply_dir).expect("create reply directory");
         fs::write(reply_dir.join("index-test.json"), "{invalid").expect("write index");
 
-        let error = read_targets(build_dir.path(), &Cancellation::default())
+        let error = Cmake::new(build_dir.path())
+            .read_targets(&Cancellation::default())
             .expect_err("reject malformed JSON");
 
         assert!(error.to_string().contains("failed to parse"));
