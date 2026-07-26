@@ -10,7 +10,7 @@ use serde::Deserialize;
 use crate::cancellation::Cancellation;
 use crate::error::Error;
 
-use super::Cmake;
+use super::BuildTree;
 
 const CLIENT_REPLY: &str = "client-cmake-ls";
 const CODEMODEL_REPLY: &str = "codemodel-v2";
@@ -76,9 +76,12 @@ struct Target {
     name: String,
 }
 
-impl Cmake<'_> {
-    /// Read sorted, unique buildable target names from the latest File API reply.
-    pub fn read_targets(&self, cancellation: &Cancellation) -> Result<BTreeSet<String>, Error> {
+impl BuildTree<'_> {
+    /// Read target names from the latest File API reply.
+    pub(super) fn read_targets(
+        &self,
+        cancellation: &Cancellation,
+    ) -> Result<BTreeSet<String>, Error> {
         for attempt in 0..MAX_READ_ATTEMPTS {
             match self.read_targets_once(cancellation) {
                 Ok(targets) => return Ok(targets),
@@ -267,7 +270,7 @@ mod tests {
 
     use crate::cancellation::Cancellation;
 
-    use super::{Cmake, Version, resolve_reference, validate_version};
+    use super::{BuildTree, Version, resolve_reference, validate_version};
 
     #[test]
     fn accepts_codemodel_v2() {
@@ -341,7 +344,7 @@ mod tests {
             }"#,
         );
 
-        let targets = Cmake::new(build_dir.path())
+        let targets = BuildTree::new(build_dir.path())
             .read_targets(&Cancellation::default())
             .expect("read target names");
         let names: Vec<_> = targets.into_iter().collect();
@@ -361,7 +364,7 @@ mod tests {
             }"#,
         );
 
-        let targets = Cmake::new(build_dir.path())
+        let targets = BuildTree::new(build_dir.path())
             .read_targets(&Cancellation::default())
             .expect("read target names");
 
@@ -375,7 +378,7 @@ mod tests {
         fs::create_dir_all(&reply_dir).expect("create reply directory");
         fs::write(reply_dir.join("index-test.json"), r#"{ "reply": {} }"#).expect("write index");
 
-        let error = Cmake::new(build_dir.path())
+        let error = BuildTree::new(build_dir.path())
             .read_targets(&Cancellation::default())
             .expect_err("reject missing response");
 
@@ -389,7 +392,7 @@ mod tests {
         fs::create_dir_all(&reply_dir).expect("create reply directory");
         fs::write(reply_dir.join("index-test.json"), "{invalid").expect("write index");
 
-        let error = Cmake::new(build_dir.path())
+        let error = BuildTree::new(build_dir.path())
             .read_targets(&Cancellation::default())
             .expect_err("reject malformed JSON");
 

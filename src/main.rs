@@ -55,13 +55,8 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli, cancellation: &Cancellation) -> Result<(), Error> {
-    let cmake = cmake::Cmake::new(&cli.build_dir);
-
-    cmake.prepare_query()?;
-    cancellation.checkpoint()?;
-    cmake.configure(cancellation)?;
-
-    let targets = cmake.read_targets(cancellation)?;
+    let build_tree = cmake::BuildTree::new(&cli.build_dir);
+    let targets = build_tree.targets(cancellation)?;
     cancellation.checkpoint()?;
     let stdout = io::stdout();
     let mut output = BufWriter::new(stdout.lock());
