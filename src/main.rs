@@ -12,7 +12,6 @@ use clap::Parser as _;
 use crate::cancellation::Cancellation;
 use crate::error::Error;
 
-
 #[derive(Debug, clap::Parser)]
 #[command(
     version,
@@ -56,11 +55,13 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli, cancellation: &Cancellation) -> Result<(), Error> {
-    cmake::prepare_query(&cli.build_dir)?;
-    cancellation.checkpoint()?;
-    cmake::configure(&cli.build_dir, cancellation)?;
+    let cmake = cmake::Cmake::new(&cli.build_dir);
 
-    let targets = cmake::file_api::read_targets(&cli.build_dir, cancellation)?;
+    cmake.prepare_query()?;
+    cancellation.checkpoint()?;
+    cmake.configure(cancellation)?;
+
+    let targets = cmake.read_targets(cancellation)?;
     cancellation.checkpoint()?;
     let stdout = io::stdout();
     let mut output = BufWriter::new(stdout.lock());

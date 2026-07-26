@@ -1,6 +1,6 @@
-//! `CMake` query installation and process execution.
+//! Operations on a configured `CMake` build tree.
 
-pub mod file_api;
+mod file_api;
 
 use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _};
@@ -44,240 +44,274 @@ type CmakeChild = Child;
 #[cfg(windows)]
 type CmakeChild = GroupChild;
 
-/// Validate a build tree and install the client-owned codemodel query.
-pub fn prepare_query(build_dir: &Path) -> Result<(), Error> {
-    let metadata = fs::metadata(build_dir)
-        .map_err(|source| Error::io("inspect build directory", build_dir.to_path_buf(), source))?;
-
-    if !metadata.is_dir() {
-        return Err(Error::InvalidBuildDirectory {
-            path: build_dir.to_path_buf(),
-            reason: "path is not a directory",
-        });
-    }
-
-    let cache_path = build_dir.join(CACHE_FILE);
-    let cache_metadata = fs::metadata(&cache_path).map_err(|source| {
-        if source.kind() == std::io::ErrorKind::NotFound {
-            Error::InvalidBuildDirectory {
-                path: build_dir.to_path_buf(),
-                reason: "CMakeCache.txt is missing; configure the build tree first",
-            }
-        } else {
-            Error::io("inspect CMake cache", cache_path.clone(), source)
-        }
-    })?;
-
-    if !cache_metadata.is_file() {
-        return Err(Error::InvalidBuildDirectory {
-            path: build_dir.to_path_buf(),
-            reason: "CMakeCache.txt is not a regular file",
-        });
-    }
-
-    let query_path = QUERY_PATH
-        .iter()
-        .fold(build_dir.to_path_buf(), |path, component| {
-            path.join(component)
-        });
-    let query_dir = query_path
-        .parent()
-        .expect("the constant query path has a parent");
-
-    fs::create_dir_all(query_dir)
-        .map_err(|source| Error::io("create File API query directory", query_dir.into(), source))?;
-    fs::File::create(&query_path)
-        .map_err(|source| Error::io("write File API query", query_path, source))?;
-
-    Ok(())
+/// A configured `CMake` build tree.
+pub struct Cmake<'a> {
+    build_dir: &'a Path,
 }
 
-/// Reconfigure an existing build tree so `CMake` services the File API query.
-pub fn configure(build_dir: &Path, cancellation: &Cancellation) -> Result<(), Error> {
-    let (mut stdout_capture, stdout_target) = create_output_capture(build_dir, "stdout")?;
-    let (mut stderr_capture, stderr_target) = create_output_capture(build_dir, "stderr")?;
-    let mut command = Command::new("cmake");
-    command
-        .arg(build_dir)
-        .stdout(stdout_target)
-        .stderr(stderr_target);
-
-    let mut child = spawn_process_group(&mut command).map_err(|source| Error::StartCmake {
-        path: build_dir.to_path_buf(),
-        source,
-    })?;
-    let status = wait_for_cmake(build_dir, &mut child, cancellation)?;
-
-    if status.success() {
-        return Ok(());
+impl<'a> Cmake<'a> {
+    /// Create a handle for the build tree at `build_dir`.
+    pub const fn new(build_dir: &'a Path) -> Self {
+        Self { build_dir }
     }
 
-    let stdout = read_output_capture(&mut stdout_capture, build_dir, "stdout", cancellation)?;
-    let stderr = read_output_capture(&mut stderr_capture, build_dir, "stderr", cancellation)?;
-    let stdout = String::from_utf8_lossy(&stdout);
-    let stderr = String::from_utf8_lossy(&stderr);
-    let mut details = String::new();
-
-    if !stdout.trim().is_empty() {
-        details.push_str("\nCMake stdout:\n");
-        details.push_str(stdout.trim_end());
-    }
-    if !stderr.trim().is_empty() {
-        details.push_str("\nCMake stderr:\n");
-        details.push_str(stderr.trim_end());
-    }
-
-    Err(Error::CmakeFailed {
-        path: build_dir.to_path_buf(),
-        status,
-        output: details,
-    })
-}
-
-fn create_output_capture(build_dir: &Path, stream: &'static str) -> Result<(File, Stdio), Error> {
-    let capture = tempfile().map_err(|source| {
-        Error::io(
-            if stream == "stdout" {
-                "create CMake stdout capture"
-            } else {
-                "create CMake stderr capture"
-            },
-            build_dir.into(),
-            source,
-        )
-    })?;
-    let target = capture.try_clone().map_err(|source| {
-        Error::io(
-            if stream == "stdout" {
-                "clone CMake stdout capture"
-            } else {
-                "clone CMake stderr capture"
-            },
-            build_dir.into(),
-            source,
-        )
-    })?;
-
-    Ok((capture, Stdio::from(target)))
-}
-
-fn read_output_capture(
-    capture: &mut File,
-    build_dir: &Path,
-    stream: &'static str,
-    cancellation: &Cancellation,
-) -> Result<Vec<u8>, Error> {
-    capture.rewind().map_err(|source| {
-        Error::io(
-            if stream == "stdout" {
-                "rewind CMake stdout capture"
-            } else {
-                "rewind CMake stderr capture"
-            },
-            build_dir.into(),
-            source,
-        )
-    })?;
-
-    let mut output = Vec::new();
-    let mut buffer = vec![0; 64 * 1024];
-    loop {
-        cancellation.checkpoint()?;
-        let read = capture.read(&mut buffer).map_err(|source| {
+    /// Validate the build tree and install the client-owned codemodel query.
+    pub fn prepare_query(&self) -> Result<(), Error> {
+        let metadata = fs::metadata(self.build_dir).map_err(|source| {
             Error::io(
-                if stream == "stdout" {
-                    "read CMake stdout capture"
-                } else {
-                    "read CMake stderr capture"
-                },
-                build_dir.into(),
+                "inspect build directory",
+                self.build_dir.to_path_buf(),
                 source,
             )
         })?;
-        if read == 0 {
-            break;
+
+        if !metadata.is_dir() {
+            return Err(Error::InvalidBuildDirectory {
+                path: self.build_dir.to_path_buf(),
+                reason: "path is not a directory",
+            });
         }
-        output.extend_from_slice(&buffer[..read]);
-    }
 
-    Ok(output)
-}
-
-fn wait_for_cmake(
-    build_dir: &Path,
-    child: &mut CmakeChild,
-    cancellation: &Cancellation,
-) -> Result<ExitStatus, Error> {
-    let wait_result = wait_for_exit(build_dir, child, cancellation);
-    if wait_result.is_err() {
-        let _ = kill_process_group(child, build_dir);
-        let _ = child.wait();
-    }
-
-    wait_result
-}
-
-fn wait_for_exit(
-    build_dir: &Path,
-    child: &mut CmakeChild,
-    cancellation: &Cancellation,
-) -> Result<ExitStatus, Error> {
-    let mut interrupt_deadline = None;
-    let mut force_killed = false;
-
-    loop {
-        cancellation.checkpoint_output()?;
-
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|source| Error::io("poll CMake process", build_dir.into(), source))?
-        {
-            return if interrupt_deadline.is_some() {
-                Err(Error::Interrupted)
+        let cache_path = self.build_dir.join(CACHE_FILE);
+        let cache_metadata = fs::metadata(&cache_path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                Error::InvalidBuildDirectory {
+                    path: self.build_dir.to_path_buf(),
+                    reason: "CMakeCache.txt is missing; configure the build tree first",
+                }
             } else {
-                Ok(status)
-            };
+                Error::io("inspect CMake cache", cache_path.clone(), source)
+            }
+        })?;
+
+        if !cache_metadata.is_file() {
+            return Err(Error::InvalidBuildDirectory {
+                path: self.build_dir.to_path_buf(),
+                reason: "CMakeCache.txt is not a regular file",
+            });
         }
 
-        let interrupt_count = cancellation.interrupt_count();
-        if interrupt_count > 0 && interrupt_deadline.is_none() {
-            request_interrupt(child, build_dir)?;
-            interrupt_deadline = Some(Instant::now() + INTERRUPT_GRACE_PERIOD);
-        } else if !force_killed
-            && interrupt_deadline
-                .is_some_and(|deadline| interrupt_count > 1 || Instant::now() >= deadline)
-        {
-            kill_process_group(child, build_dir)?;
-            force_killed = true;
-        }
+        let query_path = QUERY_PATH
+            .iter()
+            .fold(self.build_dir.to_path_buf(), |path, component| {
+                path.join(component)
+            });
+        let query_dir = query_path
+            .parent()
+            .expect("the constant query path has a parent");
 
-        thread::sleep(POLL_INTERVAL);
+        fs::create_dir_all(query_dir).map_err(|source| {
+            Error::io("create File API query directory", query_dir.into(), source)
+        })?;
+        fs::File::create(&query_path)
+            .map_err(|source| Error::io("write File API query", query_path, source))?;
+
+        Ok(())
     }
-}
 
-#[cfg(unix)]
-fn request_interrupt(child: &CmakeChild, build_dir: &Path) -> Result<(), Error> {
-    signal_process_group(child, Signal::SIGINT)
-        .map_err(|source| Error::io("interrupt CMake process group", build_dir.into(), source))
-}
+    /// Reconfigure the build tree so `CMake` services the File API query.
+    pub fn configure(&self, cancellation: &Cancellation) -> Result<(), Error> {
+        let (mut stdout_capture, stdout_target) = self.create_output_capture("stdout")?;
+        let (mut stderr_capture, stderr_target) = self.create_output_capture("stderr")?;
+        let mut command = Command::new("cmake");
+        command
+            .arg(self.build_dir)
+            .stdout(stdout_target)
+            .stderr(stderr_target);
 
-#[cfg(windows)]
-fn request_interrupt(child: &mut CmakeChild, build_dir: &Path) -> Result<(), Error> {
-    kill_process_group(child, build_dir)
-}
+        let mut child = spawn_process_group(&mut command).map_err(|source| Error::StartCmake {
+            path: self.build_dir.to_path_buf(),
+            source,
+        })?;
+        let status = self.wait_for_cmake(&mut child, cancellation)?;
 
-#[cfg(unix)]
-fn kill_process_group(child: &CmakeChild, build_dir: &Path) -> Result<(), Error> {
-    signal_process_group(child, Signal::SIGKILL)
-        .map_err(|source| Error::io("terminate CMake process group", build_dir.into(), source))
-}
+        if status.success() {
+            return Ok(());
+        }
 
-#[cfg(windows)]
-fn kill_process_group(child: &mut CmakeChild, build_dir: &Path) -> Result<(), Error> {
-    child
-        .kill()
-        .or_else(ignore_finished_process)
-        .map_err(|source| Error::io("terminate CMake process group", build_dir.into(), source))
+        let stdout = self.read_output_capture(&mut stdout_capture, "stdout", cancellation)?;
+        let stderr = self.read_output_capture(&mut stderr_capture, "stderr", cancellation)?;
+        let stdout = String::from_utf8_lossy(&stdout);
+        let stderr = String::from_utf8_lossy(&stderr);
+        let mut details = String::new();
+
+        if !stdout.trim().is_empty() {
+            details.push_str("\nCMake stdout:\n");
+            details.push_str(stdout.trim_end());
+        }
+        if !stderr.trim().is_empty() {
+            details.push_str("\nCMake stderr:\n");
+            details.push_str(stderr.trim_end());
+        }
+
+        Err(Error::CmakeFailed {
+            path: self.build_dir.to_path_buf(),
+            status,
+            output: details,
+        })
+    }
+
+    fn create_output_capture(&self, stream: &'static str) -> Result<(File, Stdio), Error> {
+        let capture = tempfile().map_err(|source| {
+            Error::io(
+                if stream == "stdout" {
+                    "create CMake stdout capture"
+                } else {
+                    "create CMake stderr capture"
+                },
+                self.build_dir.into(),
+                source,
+            )
+        })?;
+        let target = capture.try_clone().map_err(|source| {
+            Error::io(
+                if stream == "stdout" {
+                    "clone CMake stdout capture"
+                } else {
+                    "clone CMake stderr capture"
+                },
+                self.build_dir.into(),
+                source,
+            )
+        })?;
+
+        Ok((capture, Stdio::from(target)))
+    }
+
+    fn read_output_capture(
+        &self,
+        capture: &mut File,
+        stream: &'static str,
+        cancellation: &Cancellation,
+    ) -> Result<Vec<u8>, Error> {
+        capture.rewind().map_err(|source| {
+            Error::io(
+                if stream == "stdout" {
+                    "rewind CMake stdout capture"
+                } else {
+                    "rewind CMake stderr capture"
+                },
+                self.build_dir.into(),
+                source,
+            )
+        })?;
+
+        let mut output = Vec::new();
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            cancellation.checkpoint()?;
+            let read = capture.read(&mut buffer).map_err(|source| {
+                Error::io(
+                    if stream == "stdout" {
+                        "read CMake stdout capture"
+                    } else {
+                        "read CMake stderr capture"
+                    },
+                    self.build_dir.into(),
+                    source,
+                )
+            })?;
+            if read == 0 {
+                break;
+            }
+            output.extend_from_slice(&buffer[..read]);
+        }
+
+        Ok(output)
+    }
+
+    fn wait_for_cmake(
+        &self,
+        child: &mut CmakeChild,
+        cancellation: &Cancellation,
+    ) -> Result<ExitStatus, Error> {
+        let wait_result = self.wait_for_exit(child, cancellation);
+        if wait_result.is_err() {
+            let _ = self.kill_process_group(child);
+            let _ = child.wait();
+        }
+
+        wait_result
+    }
+
+    fn wait_for_exit(
+        &self,
+        child: &mut CmakeChild,
+        cancellation: &Cancellation,
+    ) -> Result<ExitStatus, Error> {
+        let mut interrupt_deadline = None;
+        let mut force_killed = false;
+
+        loop {
+            cancellation.checkpoint_output()?;
+
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|source| Error::io("poll CMake process", self.build_dir.into(), source))?
+            {
+                return if interrupt_deadline.is_some() {
+                    Err(Error::Interrupted)
+                } else {
+                    Ok(status)
+                };
+            }
+
+            let interrupt_count = cancellation.interrupt_count();
+            if interrupt_count > 0 && interrupt_deadline.is_none() {
+                self.request_interrupt(child)?;
+                interrupt_deadline = Some(Instant::now() + INTERRUPT_GRACE_PERIOD);
+            } else if !force_killed
+                && interrupt_deadline
+                    .is_some_and(|deadline| interrupt_count > 1 || Instant::now() >= deadline)
+            {
+                self.kill_process_group(child)?;
+                force_killed = true;
+            }
+
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    #[cfg(unix)]
+    fn request_interrupt(&self, child: &CmakeChild) -> Result<(), Error> {
+        signal_process_group(child, Signal::SIGINT).map_err(|source| {
+            Error::io(
+                "interrupt CMake process group",
+                self.build_dir.into(),
+                source,
+            )
+        })
+    }
+
+    #[cfg(windows)]
+    fn request_interrupt(&self, child: &mut CmakeChild) -> Result<(), Error> {
+        self.kill_process_group(child)
+    }
+
+    #[cfg(unix)]
+    fn kill_process_group(&self, child: &CmakeChild) -> Result<(), Error> {
+        signal_process_group(child, Signal::SIGKILL).map_err(|source| {
+            Error::io(
+                "terminate CMake process group",
+                self.build_dir.into(),
+                source,
+            )
+        })
+    }
+
+    #[cfg(windows)]
+    fn kill_process_group(&self, child: &mut CmakeChild) -> Result<(), Error> {
+        child
+            .kill()
+            .or_else(ignore_finished_process)
+            .map_err(|source| {
+                Error::io(
+                    "terminate CMake process group",
+                    self.build_dir.into(),
+                    source,
+                )
+            })
+    }
 }
 
 #[cfg(unix)]
