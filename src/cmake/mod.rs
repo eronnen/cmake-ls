@@ -1,5 +1,7 @@
 //! `CMake` query installation and process execution.
 
+pub mod file_api;
+
 use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _};
 use std::path::Path;

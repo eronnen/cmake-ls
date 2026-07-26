@@ -3,7 +3,6 @@
 mod cancellation;
 mod cmake;
 mod error;
-mod file_api;
 
 use std::io::{self, BufWriter, Write as _};
 use std::process::ExitCode;
@@ -61,7 +60,7 @@ fn run(cli: &Cli, cancellation: &Cancellation) -> Result<(), Error> {
     cancellation.checkpoint()?;
     cmake::configure(&cli.build_dir, cancellation)?;
 
-    let targets = file_api::read_targets(&cli.build_dir, cancellation)?;
+    let targets = cmake::file_api::read_targets(&cli.build_dir, cancellation)?;
     cancellation.checkpoint()?;
     let stdout = io::stdout();
     let mut output = BufWriter::new(stdout.lock());
