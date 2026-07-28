@@ -1,6 +1,6 @@
 use std::process::Stdio;
 
-use super::support::{TARGET_LIST, TestProject, assert_success};
+use super::support::{TestProject, assert_project_targets, assert_success};
 
 #[test]
 fn lists_buildable_targets_from_the_default_build_directory() {
@@ -8,8 +8,7 @@ fn lists_buildable_targets_from_the_default_build_directory() {
 
     let output = project.run_from_default_build_directory();
 
-    assert_success(&output);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), TARGET_LIST);
+    assert_project_targets(&output);
     assert!(output.stderr.is_empty());
     assert!(
         project
@@ -29,8 +28,7 @@ fn accepts_an_explicit_build_directory_with_spaces() {
 
     let output = project.run();
 
-    assert_success(&output);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), TARGET_LIST);
+    assert_project_targets(&output);
 }
 
 #[test]
@@ -53,7 +51,8 @@ fn treats_a_closed_stdout_pipe_as_normal_termination() {
 #[test]
 fn reuses_a_current_file_api_reply_without_running_cmake() {
     let project = TestProject::configured();
-    assert_success(&project.run());
+    let initial_output = project.run();
+    assert_project_targets(&initial_output);
 
     let output = project
         .command()
@@ -62,7 +61,7 @@ fn reuses_a_current_file_api_reply_without_running_cmake() {
         .expect("run cmake-ls without CMake on PATH");
 
     assert_success(&output);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), TARGET_LIST);
+    assert_eq!(output.stdout, initial_output.stdout);
     assert!(output.stderr.is_empty());
 }
 

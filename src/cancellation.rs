@@ -88,6 +88,10 @@ fn check_output() -> Result<(), Error> {
 }
 
 #[cfg(not(unix))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "keep the platform implementations interchangeable"
+)]
 const fn check_output() -> Result<(), Error> {
     Ok(())
 }

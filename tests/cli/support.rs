@@ -8,8 +8,6 @@ use std::time::{Duration, Instant};
 
 use tempfile::{TempDir, tempdir};
 
-pub const TARGET_LIST: &str = "app\ncore\ngenerate\n";
-
 const PROJECT: &str = r"
 cmake_minimum_required(VERSION 3.14)
 project(cmake_ls_fixture C)
@@ -99,6 +97,28 @@ pub fn assert_success(output: &Output) {
         "cmake-ls failed:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+pub fn assert_project_targets(output: &Output) {
+    assert_success(output);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let targets: Vec<_> = stdout.lines().collect();
+
+    assert!(
+        targets.windows(2).all(|pair| pair[0] < pair[1]),
+        "target list is not sorted and unique: {targets:?}"
+    );
+    for expected in ["app", "core", "generate"] {
+        assert!(
+            targets.contains(&expected),
+            "target list does not contain `{expected}`: {targets:?}"
+        );
+    }
+    assert!(
+        !targets.contains(&"headers"),
+        "target list contains non-buildable interface target: {targets:?}"
     );
 }
 
