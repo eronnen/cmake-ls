@@ -5,6 +5,8 @@ use super::support::{TestProject, assert_project_targets, assert_success};
 #[test]
 fn lists_buildable_targets_from_the_default_build_directory() {
     let project = TestProject::configured();
+    let debug_build = project.configure_additional_build("build/debug");
+    let release_build = project.configure_additional_build("build/release");
 
     let output = project.run_from_default_build_directory();
 
@@ -19,6 +21,50 @@ fn lists_buildable_targets_from_the_default_build_directory() {
         project
             .build_path(".cmake/api/v1/query/client-cmake-ls/cmakeFiles-v1")
             .is_file()
+    );
+    assert!(
+        !debug_build
+            .join(".cmake/api/v1/query/client-cmake-ls")
+            .exists()
+    );
+    assert!(
+        !release_build
+            .join(".cmake/api/v1/query/client-cmake-ls")
+            .exists()
+    );
+}
+
+#[test]
+fn falls_back_to_the_debug_build_directory_before_release() {
+    let project = TestProject::configured_at_default_path("build/debug");
+    let release_build = project.configure_additional_build("build/release");
+
+    let output = project.run_from_default_build_directory();
+
+    assert_project_targets(&output);
+    assert!(
+        project
+            .build_path(".cmake/api/v1/query/client-cmake-ls")
+            .is_dir()
+    );
+    assert!(
+        !release_build
+            .join(".cmake/api/v1/query/client-cmake-ls")
+            .exists()
+    );
+}
+
+#[test]
+fn falls_back_to_the_release_build_directory() {
+    let project = TestProject::configured_at_default_path("build/release");
+
+    let output = project.run_from_default_build_directory();
+
+    assert_project_targets(&output);
+    assert!(
+        project
+            .build_path(".cmake/api/v1/query/client-cmake-ls")
+            .is_dir()
     );
 }
 

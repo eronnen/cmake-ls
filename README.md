@@ -20,12 +20,14 @@ core
 generate
 ```
 
-The optional positional argument selects a build directory and defaults to
-`./build`:
+The optional positional argument selects a build directory:
 
 ```console
 $ cmake-ls out/debug
 ```
+
+When it is omitted, `cmake-ls` uses the first configured build tree found at
+`./build`, `./build/debug`, or `./build/release`, in that order.
 
 Use `cmake-ls --help` for the complete command-line interface.
 

@@ -5,12 +5,15 @@ mod cmake;
 mod error;
 
 use std::io::{self, BufWriter, Write as _};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser as _;
 
 use crate::cancellation::Cancellation;
 use crate::error::Error;
+
+const DEFAULT_BUILD_DIRECTORIES: [&str; 3] = ["build", "build/debug", "build/release"];
 
 #[derive(Debug, clap::Parser)]
 #[command(
@@ -22,13 +25,12 @@ struct Cli {
     #[arg(long, help = "Regenerate the File API reply before listing targets")]
     pub refresh: bool,
 
-    /// Existing `CMake` build directory.
+    /// Existing `CMake` build directory. If omitted, searches common locations.
     #[arg(
-        default_value = "build",
         value_name = "BUILD_DIR",
-        help = "Existing CMake build directory"
+        help = "Existing CMake build directory [default: first configured of build, build/debug, build/release]"
     )]
-    pub build_dir: std::path::PathBuf,
+    pub build_dir: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -59,7 +61,11 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli, cancellation: &Cancellation) -> Result<(), Error> {
-    let build_tree = cmake::BuildTree::new(&cli.build_dir);
+    let build_dir = cli
+        .build_dir
+        .clone()
+        .unwrap_or_else(find_default_build_directory);
+    let build_tree = cmake::BuildTree::new(&build_dir);
     let targets = build_tree.targets(cli.refresh, cancellation)?;
     cancellation.checkpoint()?;
     let stdout = io::stdout();
@@ -71,4 +77,12 @@ fn run(cli: &Cli, cancellation: &Cancellation) -> Result<(), Error> {
     }
 
     output.flush().map_err(Error::write_stdout)
+}
+
+fn find_default_build_directory() -> PathBuf {
+    DEFAULT_BUILD_DIRECTORIES
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.join("CMakeCache.txt").is_file())
+        .unwrap_or_else(|| Path::new(DEFAULT_BUILD_DIRECTORIES[0]).to_path_buf())
 }

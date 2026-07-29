@@ -33,6 +33,10 @@ impl TestProject {
         Self::configured_with_names("source tree", "build tree")
     }
 
+    pub fn configured_at_default_path(build_name: &str) -> Self {
+        Self::configured_with_names("source", build_name)
+    }
+
     pub fn unconfigured() -> Self {
         let temporary = tempdir().expect("create temporary directory");
         let source_dir = temporary.path().join("source");
@@ -83,6 +87,12 @@ impl TestProject {
 
     pub fn replace_cmake_lists(&self, contents: &str) {
         fs::write(self.source_dir.join("CMakeLists.txt"), contents).expect("replace project file");
+    }
+
+    pub fn configure_additional_build(&self, build_name: &str) -> PathBuf {
+        let build_dir = self.temporary.path().join(build_name);
+        configure_project(&self.source_dir, &build_dir);
+        build_dir
     }
 
     #[cfg(unix)]
